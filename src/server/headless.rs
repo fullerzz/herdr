@@ -599,6 +599,9 @@ impl HeadlessServer {
             self.stream_host_mouse_capture_mode();
 
             self.app.sync_headless_animation_timer(now);
+            if needs_render {
+                self.sync_client_progress_bars();
+            }
 
             // 7. Render virtually and stream frames.
             if needs_render && self.app.can_render_now(now) {
@@ -2731,6 +2734,7 @@ impl HeadlessServer {
             let deferred_changed = self
                 .app
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            self.sync_client_progress_bars();
             return changed | deferred_changed;
         }
         let response = if matches!(
@@ -2903,6 +2907,7 @@ impl HeadlessServer {
             changed |= self.app.ensure_default_workspace();
         }
 
+        self.sync_client_progress_bars();
         changed
     }
 
@@ -4211,6 +4216,83 @@ mod tests {
                     .expect("progress bar")
             ),
             (1, 42)
+        );
+    }
+
+    #[test]
+    fn api_focus_change_resyncs_foreground_app_progress_bar() {
+        let mut server = test_headless_server();
+        let first = crate::workspace::Workspace::test_new("progress");
+        let first_pane_id = first.focused_pane_id().expect("focused pane");
+        let first_terminal_id = first
+            .terminal_id(first_pane_id)
+            .expect("terminal id")
+            .clone();
+        let second = crate::workspace::Workspace::test_new("empty");
+        let second_workspace_id = second.id.clone();
+        server.app.state.workspaces = vec![first, second];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .expect("terminal")
+            .set_progress(test_progress(
+                crate::terminal::TerminalProgressState::Normal,
+                42,
+            ));
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_client_progress_bars();
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("progress bar")
+            ),
+            (1, 42)
+        );
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "focus_workspace".into(),
+                    method: api::schema::Method::WorkspaceFocus(api::schema::WorkspaceTarget {
+                        workspace_id: second_workspace_id,
+                    }),
+                },
+                respond_to,
+            })
+        );
+        let _response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("api response");
+
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("hidden progress bar")
+            ),
+            (0, 0)
         );
     }
 
