@@ -65,6 +65,66 @@ pub struct TerminalStateMutation {
     pub session_ref_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalProgressState {
+    #[default]
+    Hidden,
+    Normal,
+    Error,
+    Indeterminate,
+    Paused,
+}
+
+impl TerminalProgressState {
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Hidden),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Error),
+            3 => Some(Self::Indeterminate),
+            4 => Some(Self::Paused),
+            _ => None,
+        }
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Hidden => 0,
+            Self::Normal => 1,
+            Self::Error => 2,
+            Self::Indeterminate => 3,
+            Self::Paused => 4,
+        }
+    }
+
+    pub const fn api_name(self) -> Option<&'static str> {
+        match self {
+            Self::Hidden => None,
+            Self::Normal => Some("normal"),
+            Self::Error => Some("error"),
+            Self::Indeterminate => Some("indeterminate"),
+            Self::Paused => Some("paused"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalProgress {
+    pub state: TerminalProgressState,
+    pub progress: u8,
+}
+
+impl TerminalProgress {
+    pub const HIDDEN: Self = Self {
+        state: TerminalProgressState::Hidden,
+        progress: 0,
+    };
+
+    pub const fn is_hidden(self) -> bool {
+        matches!(self.state, TerminalProgressState::Hidden)
+    }
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -88,6 +148,7 @@ pub struct TerminalState {
     metadata_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
+    pub progress: TerminalProgress,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -114,6 +175,7 @@ impl TerminalState {
             metadata_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
+            progress: TerminalProgress::HIDDEN,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -1119,7 +1181,20 @@ impl TerminalState {
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.pending_agent_resume_plan = None;
+        self.clear_progress();
         self.clear_agent_name();
+    }
+
+    pub fn set_progress(&mut self, progress: TerminalProgress) -> bool {
+        if self.progress == progress {
+            return false;
+        }
+        self.progress = progress;
+        true
+    }
+
+    pub fn clear_progress(&mut self) -> bool {
+        self.set_progress(TerminalProgress::HIDDEN)
     }
 
     pub fn is_agent_terminal(&self) -> bool {
@@ -3646,6 +3721,10 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
         });
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_progress(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            progress: 80,
+        });
 
         terminal.clear_agent_runtime_identity_after_respawn();
 
@@ -3653,6 +3732,7 @@ mod tests {
         assert!(terminal.detected_agent.is_none());
         assert!(terminal.agent_name.is_none());
         assert!(terminal.persisted_agent_session.is_none());
+        assert_eq!(terminal.progress, TerminalProgress::HIDDEN);
         assert!(!terminal.respawn_shell_on_exit);
     }
 

@@ -536,6 +536,19 @@ If no native session reference is stored, the field is omitted.
 
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
 
+These responses include a read-only `progress_bar` object when a pane reports visible OSC 9;4 progress:
+
+```json
+{
+  "progress_bar": {
+    "state": "normal",
+    "progress": 72
+  }
+}
+```
+
+`state` is one of `normal`, `error`, `indeterminate`, or `paused`. `progress` is `0` through `100`. Hidden progress is omitted.
+
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 
 ```json

@@ -123,6 +123,12 @@ pub enum AgentStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressBarInfo {
+    pub state: String,
+    pub progress: u8,
+}
+
 pub(crate) fn default_true() -> bool {
     true
 }

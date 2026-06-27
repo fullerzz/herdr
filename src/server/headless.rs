@@ -763,6 +763,7 @@ impl HeadlessServer {
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
             self.sync_visible_server_config_diagnostic(false);
+            self.sync_client_progress_bars();
             return;
         };
         let Some(client) = self.clients.get(&client_id) else {
@@ -772,6 +773,7 @@ impl HeadlessServer {
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
             self.sync_visible_server_config_diagnostic(false);
+            self.sync_client_progress_bars();
             return;
         };
 
@@ -799,6 +801,7 @@ impl HeadlessServer {
             host_terminal_appearance_explicit,
         );
         self.app.set_host_terminal_theme(host_terminal_theme);
+        self.sync_client_progress_bars();
     }
 
     #[cfg(unix)]
@@ -1924,6 +1927,11 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::TerminalProgressReported { .. } => {
+                self.app.handle_internal_event(ev);
+                self.sync_client_progress_bars();
+                false
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true
@@ -1974,6 +1982,7 @@ impl HeadlessServer {
             };
             had_event = true;
             changed |= self.handle_internal_event_with_forwarding(ev);
+            self.sync_client_progress_bars();
         }
         (had_event, changed)
     }
@@ -2069,6 +2078,109 @@ impl HeadlessServer {
         } else {
             false
         }
+    }
+
+    fn sync_client_progress_bars(&mut self) {
+        let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
+        for client_id in client_ids {
+            let progress = self.progress_bar_for_client(client_id);
+            self.send_progress_bar_to_client(client_id, progress);
+        }
+    }
+
+    fn progress_bar_for_client(&self, client_id: u64) -> crate::terminal::TerminalProgress {
+        let Some(mode) = self
+            .clients
+            .get(&client_id)
+            .map(|client| client.mode.clone())
+        else {
+            return crate::terminal::TerminalProgress::HIDDEN;
+        };
+        match mode {
+            ClientConnectionMode::App if self.foreground_client_id == Some(client_id) => {
+                self.focused_app_progress_bar()
+            }
+            ClientConnectionMode::App => crate::terminal::TerminalProgress::HIDDEN,
+            ClientConnectionMode::TerminalAttach { terminal_id } => self
+                .terminal_progress_bar_by_string(&terminal_id)
+                .unwrap_or(crate::terminal::TerminalProgress::HIDDEN),
+        }
+    }
+
+    fn focused_app_progress_bar(&self) -> crate::terminal::TerminalProgress {
+        let Some(ws_idx) = self.app.state.active else {
+            return crate::terminal::TerminalProgress::HIDDEN;
+        };
+        let Some(ws) = self.app.state.workspaces.get(ws_idx) else {
+            return crate::terminal::TerminalProgress::HIDDEN;
+        };
+        let Some(pane_id) = ws.focused_pane_id() else {
+            return crate::terminal::TerminalProgress::HIDDEN;
+        };
+        let Some(terminal_id) = ws.terminal_id(pane_id) else {
+            return crate::terminal::TerminalProgress::HIDDEN;
+        };
+        self.app
+            .state
+            .terminals
+            .get(terminal_id)
+            .map(|terminal| terminal.progress)
+            .unwrap_or(crate::terminal::TerminalProgress::HIDDEN)
+    }
+
+    fn terminal_progress_bar_by_string(
+        &self,
+        terminal_id: &str,
+    ) -> Option<crate::terminal::TerminalProgress> {
+        let terminal_id = self.terminal_id_by_string(terminal_id)?;
+        self.app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.progress)
+    }
+
+    fn send_progress_bar_to_client(
+        &mut self,
+        client_id: u64,
+        progress: crate::terminal::TerminalProgress,
+    ) -> bool {
+        let should_send = match self.clients.get(&client_id) {
+            Some(client) => client.writer.is_some() && client.last_progress_bar != progress,
+            None => false,
+        };
+        if !should_send {
+            return false;
+        }
+        let serialized = match Self::frame_server_message(&ServerMessage::ProgressBar {
+            state: progress.state.as_u8(),
+            progress: progress.progress,
+        }) {
+            Ok(framed) => framed,
+            Err(err) => {
+                warn!(client_id, err = %err, "failed to serialize progress bar for client");
+                return false;
+            }
+        };
+
+        {
+            let Some(client) = self.clients.get_mut(&client_id) else {
+                return false;
+            };
+            let Some(writer) = client.writer.as_ref() else {
+                return false;
+            };
+            if writer.control.send(serialized).is_ok() {
+                client.last_progress_bar = progress;
+                return true;
+            }
+        }
+        debug!(
+            client_id,
+            "client writer channel closed during progress send"
+        );
+        self.remove_client_and_resize_if_needed(client_id);
+        false
     }
 
     fn shutdown_terminal_attach_clients(&mut self, terminal_id: &str, reason: String) {
@@ -2180,6 +2292,7 @@ impl HeadlessServer {
         if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
             runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
         }
+        self.sync_client_progress_bars();
         true
     }
 
@@ -3979,6 +4092,20 @@ mod tests {
         }
     }
 
+    fn read_server_progress_bar(bytes: Vec<u8>) -> (u8, u8) {
+        match read_server_message(bytes) {
+            ServerMessage::ProgressBar { state, progress } => (state, progress),
+            other => panic!("expected progress bar, got {other:?}"),
+        }
+    }
+
+    fn test_progress(
+        state: crate::terminal::TerminalProgressState,
+        progress: u8,
+    ) -> crate::terminal::TerminalProgress {
+        crate::terminal::TerminalProgress { state, progress }
+    }
+
     #[test]
     fn headless_api_request_drains_all_pending_internal_events_before_reading_state() {
         let mut server = test_headless_server();
@@ -4029,6 +4156,237 @@ mod tests {
             control_rx,
             render_rx,
         )
+    }
+
+    fn seed_progress_workspace(
+        server: &mut HeadlessServer,
+    ) -> (crate::layout::PaneId, crate::terminal::TerminalId) {
+        let workspace = crate::workspace::Workspace::test_new("progress");
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.ensure_test_terminals();
+        (pane_id, terminal_id)
+    }
+
+    #[test]
+    fn progress_bar_forwards_focused_pane_to_foreground_app_client() {
+        let mut server = test_headless_server();
+        let (_pane_id, terminal_id) = seed_progress_workspace(&mut server);
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_progress(test_progress(
+                crate::terminal::TerminalProgressState::Normal,
+                42,
+            ));
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        server.sync_client_progress_bars();
+
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("progress bar")
+            ),
+            (1, 42)
+        );
+    }
+
+    #[test]
+    fn progress_bar_resets_background_app_client_to_hidden() {
+        let mut server = test_headless_server();
+        seed_progress_workspace(&mut server);
+        let (background_writer, background_control_rx, _background_render_rx) =
+            test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(background_writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.clients.get_mut(&2).unwrap().last_progress_bar =
+            test_progress(crate::terminal::TerminalProgressState::Normal, 42);
+
+        server.sync_client_progress_bars();
+
+        assert_eq!(
+            read_server_progress_bar(
+                background_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("hidden progress bar")
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn progress_bar_forwards_attached_terminal_to_direct_attach_client() {
+        let mut server = test_headless_server();
+        let (_pane_id, terminal_id) = seed_progress_workspace(&mut server);
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_progress(test_progress(
+                crate::terminal::TerminalProgressState::Error,
+                90,
+            ));
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            7,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id: terminal_id.to_string(),
+                },
+                None,
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                7,
+                RenderEncoding::SemanticFrame,
+                false,
+                Some(writer),
+            ),
+        );
+
+        server.sync_client_progress_bars();
+
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("progress bar")
+            ),
+            (2, 90)
+        );
+    }
+
+    #[test]
+    fn progress_bar_deduplicates_unchanged_updates() {
+        let mut server = test_headless_server();
+        let (_pane_id, terminal_id) = seed_progress_workspace(&mut server);
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_progress(test_progress(
+                crate::terminal::TerminalProgressState::Paused,
+                60,
+            ));
+
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        server.sync_client_progress_bars();
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("progress bar")
+            ),
+            (4, 60)
+        );
+
+        server.sync_client_progress_bars();
+        assert!(
+            control_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "duplicate progress bar should not be sent"
+        );
+    }
+
+    #[test]
+    fn progress_bar_missing_active_workspace_resets_hidden_without_panic() {
+        let mut server = test_headless_server();
+        seed_progress_workspace(&mut server);
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.clients.get_mut(&1).unwrap().last_progress_bar =
+            test_progress(crate::terminal::TerminalProgressState::Normal, 10);
+        server.app.state.workspaces.clear();
+        server.app.state.active = Some(0);
+
+        server.sync_client_progress_bars();
+
+        assert_eq!(
+            read_server_progress_bar(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("hidden progress bar")
+            ),
+            (0, 0)
+        );
     }
 
     fn retained_test_server(

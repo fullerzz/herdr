@@ -26,7 +26,7 @@ use super::{
         maybe_filter_primary_screen_scrollback_clear, restore_host_terminal_theme_if_needed,
         write_host_terminal_theme_selective, AgentOscStateTracker, CwdOscTracker,
         DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker, DefaultColorQuery,
-        DefaultColorTrackedEvent, Osc52Forwarder, OscDebugTracker,
+        DefaultColorTrackedEvent, Osc52Forwarder, OscDebugTracker, ProgressBarOscTracker,
     },
     xtgettcap::{XtgettcapQueryTracker, XtgettcapResponse},
 };
@@ -105,6 +105,7 @@ pub(crate) struct ProcessBytesResult {
     pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
+    pub progress_reports: Vec<crate::terminal::TerminalProgress>,
     pub terminal_responses: Vec<Bytes>,
 }
 
@@ -128,6 +129,7 @@ pub(crate) struct GhosttyPaneCore {
     pub child_default_background_changed: bool,
     pub osc52_forwarder: Osc52Forwarder,
     pub cwd_osc_tracker: CwdOscTracker,
+    pub progress_bar_osc_tracker: ProgressBarOscTracker,
     pub osc_debug_tracker: OscDebugTracker,
     pub agent_osc_state: AgentOscStateTracker,
     pub xtgettcap_query_tracker: XtgettcapQueryTracker,
@@ -386,6 +388,7 @@ impl GhosttyPaneTerminal {
                 child_default_background_changed: false,
                 osc52_forwarder: Osc52Forwarder::default(),
                 cwd_osc_tracker: CwdOscTracker::default(),
+                progress_bar_osc_tracker: ProgressBarOscTracker::default(),
                 osc_debug_tracker: OscDebugTracker::default(),
                 agent_osc_state: AgentOscStateTracker::default(),
                 xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
@@ -493,6 +496,7 @@ impl GhosttyPaneTerminal {
                 render_delay: None,
                 clipboard_writes: Vec::new(),
                 reported_cwd: None,
+                progress_reports: Vec::new(),
                 terminal_responses: Vec::new(),
             };
         };
@@ -512,6 +516,8 @@ impl GhosttyPaneTerminal {
         let clipboard_writes = core.osc52_forwarder.drain_pending();
         core.cwd_osc_tracker.observe(bytes);
         let reported_cwd = core.cwd_osc_tracker.drain_latest();
+        core.progress_bar_osc_tracker.observe(bytes);
+        let progress_reports = core.progress_bar_osc_tracker.drain_pending();
         core.osc_debug_tracker.observe(bytes);
         for event in core.osc_debug_tracker.drain_pending() {
             debug!(
@@ -606,6 +612,7 @@ impl GhosttyPaneTerminal {
             render_delay,
             clipboard_writes,
             reported_cwd,
+            progress_reports,
             terminal_responses,
         }
     }
@@ -3600,6 +3607,33 @@ mod tests {
             vec![expected_xtgettcap_response("5463", None)]
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_pty_bytes_reports_progress_without_interfering_with_other_osc_tracking() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane.process_pty_bytes(
+            pane_id,
+            0,
+            b"\x1b]52;c;dGVzdA==\x07\x1b]7;file:///tmp\x07\x1b]11;#112233\x07\x1b]9;4;1;25\x07\x1b]9;agent\x07",
+            &tx,
+        );
+
+        assert_eq!(result.clipboard_writes, vec![b"test".to_vec()]);
+        assert_eq!(result.reported_cwd, Some(std::path::PathBuf::from("/tmp")));
+        assert_eq!(
+            result.progress_reports,
+            vec![crate::terminal::TerminalProgress {
+                state: crate::terminal::TerminalProgressState::Normal,
+                progress: 25,
+            }]
+        );
+        assert!(result.terminal_responses.is_empty());
+        assert_eq!(pane.agent_osc_progress(), "agent");
     }
 
     #[test]

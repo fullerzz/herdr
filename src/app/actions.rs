@@ -2545,6 +2545,10 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::TerminalProgressReported { pane_id, progress } => {
+                self.set_terminal_progress_for_pane(pane_id, progress);
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -2872,6 +2876,7 @@ impl AppState {
         }
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
+        self.clear_terminal_progress_for_pane(pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
         self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         self.public_pane_id_aliases
@@ -2904,6 +2909,34 @@ impl AppState {
         } else {
             self.remove_unattached_terminal_ids(pane_terminal_id);
         }
+    }
+
+    pub(crate) fn set_terminal_progress_for_pane(
+        &mut self,
+        pane_id: PaneId,
+        progress: crate::terminal::TerminalProgress,
+    ) -> bool {
+        let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+            ws.pane_state(pane_id)
+                .map(|pane| pane.attached_terminal_id.clone())
+        }) else {
+            return false;
+        };
+        self.terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| terminal.set_progress(progress))
+    }
+
+    pub(crate) fn clear_terminal_progress_for_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+            ws.pane_state(pane_id)
+                .map(|pane| pane.attached_terminal_id.clone())
+        }) else {
+            return false;
+        };
+        self.terminals
+            .get_mut(&terminal_id)
+            .is_some_and(crate::terminal::TerminalState::clear_progress)
     }
 }
 
@@ -4674,6 +4707,36 @@ mod tests {
         assert_eq!(state.terminals.get(&terminal_id).unwrap().cwd, cwd);
         assert!(state.session_dirty);
         let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn terminal_progress_report_updates_terminal_without_marking_session_dirty() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        state.session_dirty = false;
+
+        let updates = state.handle_app_event(AppEvent::TerminalProgressReported {
+            pane_id,
+            progress: crate::terminal::TerminalProgress {
+                state: crate::terminal::TerminalProgressState::Normal,
+                progress: 42,
+            },
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().progress,
+            crate::terminal::TerminalProgress {
+                state: crate::terminal::TerminalProgressState::Normal,
+                progress: 42,
+            }
+        );
+        assert!(!state.session_dirty);
     }
 
     #[test]

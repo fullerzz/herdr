@@ -325,7 +325,7 @@ impl Osc52Forwarder {
                     }
                 }
                 Osc52ForwarderState::OscBody => match byte {
-                    0x07 => {
+                    0x07 | 0x9c => {
                         self.finalize();
                         self.state = Osc52ForwarderState::Ground;
                     }
@@ -397,6 +397,10 @@ impl CwdOscTracker {
                         self.finalize();
                         self.state = Osc52ForwarderState::Ground;
                     }
+                    0x9c => {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    }
                     0x1b => self.state = Osc52ForwarderState::OscEscape,
                     _ => self.body.push(byte),
                 },
@@ -429,6 +433,118 @@ impl CwdOscTracker {
     pub(super) fn drain_latest(&mut self) -> Option<PathBuf> {
         self.pending.drain(..).next_back()
     }
+}
+
+/// Reconstructs OSC 9;4 progress bar updates from raw PTY bytes.
+#[derive(Debug, Default)]
+pub(super) struct ProgressBarOscTracker {
+    state: Osc52ForwarderState,
+    body: Vec<u8>,
+    last_progress: u8,
+    pending: Vec<crate::terminal::TerminalProgress>,
+}
+
+impl ProgressBarOscTracker {
+    pub(super) fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                Osc52ForwarderState::Ground => {
+                    if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    }
+                }
+                Osc52ForwarderState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = Osc52ForwarderState::OscBody;
+                    } else if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    } else {
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                }
+                Osc52ForwarderState::OscBody => match byte {
+                    0x07 => {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                    0x9c => {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                    0x1b => self.state = Osc52ForwarderState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                Osc52ForwarderState::OscEscape => {
+                    if byte == b'\\' {
+                        self.finalize();
+                        self.state = Osc52ForwarderState::Ground;
+                    } else {
+                        self.body.push(0x1b);
+                        self.body.push(byte);
+                        self.state = Osc52ForwarderState::OscBody;
+                    }
+                }
+            }
+
+            if self.body.len() > 64 {
+                self.body.clear();
+                self.state = Osc52ForwarderState::Ground;
+            }
+        }
+    }
+
+    fn finalize(&mut self) {
+        if let Some((state, progress)) = parse_progress_bar_osc(&self.body) {
+            let progress = if state == crate::terminal::TerminalProgressState::Indeterminate {
+                self.last_progress
+            } else {
+                progress.unwrap_or(self.last_progress)
+            };
+            self.last_progress = progress;
+            self.pending
+                .push(crate::terminal::TerminalProgress { state, progress });
+        }
+        self.body.clear();
+    }
+
+    pub(super) fn drain_pending(&mut self) -> Vec<crate::terminal::TerminalProgress> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+fn parse_progress_bar_osc(
+    body: &[u8],
+) -> Option<(crate::terminal::TerminalProgressState, Option<u8>)> {
+    let rest = body.strip_prefix(b"9;4;")?;
+    let separator = rest.iter().position(|byte| *byte == b';');
+    let (state_bytes, progress_bytes) = match separator {
+        Some(index) => (&rest[..index], Some(&rest[index + 1..])),
+        None => (rest, None),
+    };
+    let state = parse_bounded_u8(state_bytes, 4)
+        .and_then(crate::terminal::TerminalProgressState::from_u8)?;
+    let progress = match progress_bytes {
+        None | Some(b"") => None,
+        Some(bytes) => {
+            if bytes.contains(&b';') {
+                return None;
+            }
+            Some(parse_bounded_u8(bytes, 100)?)
+        }
+    };
+    Some((state, progress))
+}
+
+fn parse_bounded_u8(bytes: &[u8], max: u8) -> Option<u8> {
+    if bytes.is_empty() || bytes.len() > 3 || !bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut value: u16 = 0;
+    for &digit in bytes {
+        value = value * 10 + u16::from(digit - b'0');
+    }
+    (value <= u16::from(max)).then_some(value as u8)
 }
 
 fn parse_cwd_osc(body: &[u8]) -> Option<PathBuf> {
@@ -1013,6 +1129,120 @@ mod tests {
             body: Vec::new(),
             pending: Vec::new(),
         }
+    }
+
+    fn progress_report(
+        state: crate::terminal::TerminalProgressState,
+        progress: u8,
+    ) -> crate::terminal::TerminalProgress {
+        crate::terminal::TerminalProgress { state, progress }
+    }
+
+    #[test]
+    fn progress_bar_tracker_accepts_all_states_with_bel() {
+        for (state, expected) in [
+            (0, crate::terminal::TerminalProgressState::Hidden),
+            (1, crate::terminal::TerminalProgressState::Normal),
+            (2, crate::terminal::TerminalProgressState::Error),
+            (3, crate::terminal::TerminalProgressState::Indeterminate),
+            (4, crate::terminal::TerminalProgressState::Paused),
+        ] {
+            let mut tracker = ProgressBarOscTracker::default();
+            tracker.observe(format!("\x1b]9;4;{state};42\x07").as_bytes());
+            let progress = if expected == crate::terminal::TerminalProgressState::Indeterminate {
+                0
+            } else {
+                42
+            };
+            assert_eq!(
+                tracker.drain_pending(),
+                vec![progress_report(expected, progress)]
+            );
+        }
+    }
+
+    #[test]
+    fn progress_bar_tracker_accepts_st_and_split_reads() {
+        let mut tracker = ProgressBarOscTracker::default();
+
+        tracker.observe(b"\x1b]9;4;1");
+        assert!(tracker.drain_pending().is_empty());
+        tracker.observe(b";55\x1b\\");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![progress_report(
+                crate::terminal::TerminalProgressState::Normal,
+                55
+            )]
+        );
+
+        tracker.observe(b"\x1b]9;4;2;44\x9c");
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![progress_report(
+                crate::terminal::TerminalProgressState::Error,
+                44
+            )]
+        );
+    }
+
+    #[test]
+    fn progress_bar_tracker_state_only_and_indeterminate_preserve_progress() {
+        let mut tracker = ProgressBarOscTracker::default();
+
+        tracker.observe(b"\x1b]9;4;1;67\x07");
+        tracker.observe(b"\x1b]9;4;2\x07");
+        tracker.observe(b"\x1b]9;4;4;\x07");
+        tracker.observe(b"\x1b]9;4;3;12\x07");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![
+                progress_report(crate::terminal::TerminalProgressState::Normal, 67),
+                progress_report(crate::terminal::TerminalProgressState::Error, 67),
+                progress_report(crate::terminal::TerminalProgressState::Paused, 67),
+                progress_report(crate::terminal::TerminalProgressState::Indeterminate, 67),
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_bar_tracker_ignores_malformed_values() {
+        let mut tracker = ProgressBarOscTracker::default();
+
+        for body in [
+            "9",
+            "9;4",
+            "9;4;",
+            "9;4;5;10",
+            "9;4;1;101",
+            "9;4;1;9999",
+            "9;4;9999;10",
+            "9;4;1;1x",
+            "9;4;x;10",
+            "9;4;1;10;extra",
+        ] {
+            tracker.observe(format!("\x1b]{body}\x07").as_bytes());
+        }
+
+        assert!(tracker.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn progress_bar_tracker_ignores_oversized_body() {
+        let mut tracker = ProgressBarOscTracker::default();
+        let oversized = "x".repeat(65);
+
+        tracker.observe(format!("\x1b]{oversized}\x07\x1b]9;4;1;5\x1b\\").as_bytes());
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![progress_report(
+                crate::terminal::TerminalProgressState::Normal,
+                5
+            )]
+        );
     }
 
     #[test]

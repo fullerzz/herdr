@@ -2070,6 +2070,44 @@ mod tests {
     }
 
     #[test]
+    fn api_pane_info_reports_non_hidden_progress_bar_only() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal id")
+            .clone();
+
+        let hidden_response = app.handle_pane_get(
+            "hidden".into(),
+            PaneTarget {
+                pane_id: public_pane_id.clone(),
+            },
+        );
+        let hidden_json: serde_json::Value = serde_json::from_str(&hidden_response).unwrap();
+        assert!(hidden_json["result"]["pane"].get("progress_bar").is_none());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_progress(crate::terminal::TerminalProgress {
+                state: crate::terminal::TerminalProgressState::Paused,
+                progress: 73,
+            });
+        let response = app.handle_pane_get(
+            "visible".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["pane"]["progress_bar"]["state"], "paused");
+        assert_eq!(value["result"]["pane"]["progress_bar"]["progress"], 73);
+    }
+
+    #[test]
     fn api_pane_current_dispatches_through_socket_request() {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);

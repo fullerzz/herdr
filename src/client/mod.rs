@@ -329,6 +329,7 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    write_host_progress_bar(&mut io::stdout(), 0, 0)?;
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
@@ -426,6 +427,7 @@ fn write_terminal_restore_postlude(
             crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
         )?;
     }
+    writer.write_all(&progress_bar_osc(0, 0))?;
     // Restore a visible cursor and reset DECSCUSR back to the terminal default.
     writer.write_all(b"\x1b[?25h\x1b[0 q")?;
     writer.flush()
@@ -1223,6 +1225,9 @@ async fn run_client_loop(
                     write_window_title(title.as_deref());
                     let _ = io::stdout().flush();
                 }
+                ServerMessage::ProgressBar { state, progress } => {
+                    let _ = write_host_progress_bar(&mut io::stdout(), state, progress);
+                }
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
                         &mut state.sound_config,
@@ -1497,6 +1502,15 @@ fn window_title_osc(title: Option<&str>) -> Vec<u8> {
 
 fn write_window_title(title: Option<&str>) {
     let _ = io::stdout().write_all(&window_title_osc(title));
+}
+
+fn progress_bar_osc(state: u8, progress: u8) -> Vec<u8> {
+    format!("\x1b]9;4;{state};{progress}\x07").into_bytes()
+}
+
+fn write_host_progress_bar(writer: &mut impl io::Write, state: u8, progress: u8) -> io::Result<()> {
+    writer.write_all(&progress_bar_osc(state, progress))?;
+    writer.flush()
 }
 
 // ---------------------------------------------------------------------------
@@ -1863,7 +1877,7 @@ mod tests {
     fn terminal_restore_postlude_restores_visible_default_cursor() {
         let mut output = Vec::new();
         write_terminal_restore_postlude(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[?25h\x1b[0 q");
+        assert_eq!(output, b"\x1b]9;4;0;0\x07\x1b[?25h\x1b[0 q");
     }
 
     #[test]
@@ -1875,6 +1889,7 @@ mod tests {
         expected.extend_from_slice(
             crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
         );
+        expected.extend_from_slice(b"\x1b]9;4;0;0\x07");
         expected.extend_from_slice(b"\x1b[?25h\x1b[0 q");
         assert_eq!(output, expected);
     }
@@ -2273,5 +2288,10 @@ mod tests {
             b"\x1b]0;herdr api\x07"
         );
         assert_eq!(window_title_osc(None), b"\x1b]0;herdr\x07");
+    }
+
+    #[test]
+    fn progress_bar_osc_encodes_numeric_state_and_progress() {
+        assert_eq!(progress_bar_osc(4, 75), b"\x1b]9;4;4;75\x07");
     }
 }

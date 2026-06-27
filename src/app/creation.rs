@@ -377,6 +377,7 @@ impl App {
             custom_status: presentation.custom_status,
             state_labels: presentation.state_labels,
             agent_session: terminal_agent_session_info(terminal),
+            progress_bar: terminal_progress_bar_info(terminal.progress),
             revision: terminal.revision,
         })
     }
@@ -451,4 +452,17 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+fn terminal_progress_bar_info(
+    progress: crate::terminal::TerminalProgress,
+) -> Option<crate::api::schema::ProgressBarInfo> {
+    if progress.is_hidden() {
+        return None;
+    }
+
+    Some(crate::api::schema::ProgressBarInfo {
+        state: progress.state.api_name()?.to_owned(),
+        progress: progress.progress,
+    })
 }

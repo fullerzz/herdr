@@ -53,6 +53,8 @@ pub(crate) struct ClientConnection {
     pub(crate) render_pending: bool,
     /// Last host mouse capture mode sent to this client.
     pub(crate) host_mouse_capture_active: Option<bool>,
+    /// Last host progress bar state sent to this client.
+    pub(crate) last_progress_bar: crate::terminal::TerminalProgress,
     /// Temporary files staged from this client's local clipboard image pastes.
     pub(crate) staged_clipboard_files: Vec<PathBuf>,
     /// Channels for sending framed ServerMessage data to the client writer thread.
@@ -115,6 +117,7 @@ impl ClientConnection {
             graphics_surface_reset_pending: false,
             render_pending: false,
             host_mouse_capture_active: None,
+            last_progress_bar: crate::terminal::TerminalProgress::HIDDEN,
             staged_clipboard_files: Vec::new(),
             writer,
         }

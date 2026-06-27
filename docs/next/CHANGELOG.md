@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added OSC 9;4 progress-bar passthrough for the focused pane and direct terminal attach clients. Pane and agent socket API responses now include an optional read-only `progress_bar` field while progress is visible.
+
 ### Fixed
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
 

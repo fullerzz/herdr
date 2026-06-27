@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{AgentStatus, ReadFormat, ReadSource, SplitDirection};
+use super::common::{AgentStatus, ProgressBarInfo, ReadFormat, ReadSource, SplitDirection};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentReadParams {
@@ -67,6 +67,8 @@ pub struct AgentInfo {
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_bar: Option<ProgressBarInfo>,
     pub workspace_id: String,
     pub tab_id: String,
     pub pane_id: String,

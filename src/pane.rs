@@ -1696,6 +1696,17 @@ impl PaneRuntime {
                         );
                     }
                 }
+                for progress in result.progress_reports {
+                    if let Err(err) = read_events
+                        .try_send(AppEvent::TerminalProgressReported { pane_id, progress })
+                    {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to queue terminal progress report"
+                        );
+                    }
+                }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
                 }
@@ -1848,6 +1859,17 @@ impl PaneRuntime {
                             pane = pane_id.raw(),
                             err = %err,
                             "failed to send OSC 52 clipboard write"
+                        );
+                    }
+                }
+                for progress in result.progress_reports {
+                    if let Err(err) =
+                        events.try_send(AppEvent::TerminalProgressReported { pane_id, progress })
+                    {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to send terminal progress report"
                         );
                     }
                 }

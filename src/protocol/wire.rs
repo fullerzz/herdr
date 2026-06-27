@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -642,6 +642,14 @@ pub enum ServerMessage {
         /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
         enabled: bool,
     },
+
+    /// Set the client-local host terminal progress bar with OSC 9;4.
+    ProgressBar {
+        /// OSC 9;4 state: 0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused.
+        state: u8,
+        /// Progress value from 0 to 100.
+        progress: u8,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -935,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn client_message_wire_tags_preserve_protocol_14_order() {
+    fn client_message_wire_tags_preserve_protocol_15_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())
                 .unwrap()
@@ -1333,6 +1341,18 @@ mod tests {
     #[test]
     fn server_mouse_capture_roundtrip() {
         let msg = ServerMessage::MouseCapture { enabled: true };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_progress_bar_roundtrip() {
+        let msg = ServerMessage::ProgressBar {
+            state: 1,
+            progress: 42,
+        };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();

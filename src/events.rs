@@ -136,6 +136,11 @@ pub enum AppEvent {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
     },
+    /// A pane child reported an OSC 9;4 host progress bar state.
+    TerminalProgressReported {
+        pane_id: PaneId,
+        progress: crate::terminal::TerminalProgress,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
