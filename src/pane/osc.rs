@@ -397,7 +397,7 @@ impl CwdOscTracker {
                         self.finalize();
                         self.state = Osc52ForwarderState::Ground;
                     }
-                    0x9c => {
+                    0x9c if !continues_incomplete_utf8(&self.body, byte) => {
                         self.finalize();
                         self.state = Osc52ForwarderState::Ground;
                     }
@@ -557,6 +557,32 @@ fn parse_cwd_osc(body: &[u8]) -> Option<PathBuf> {
         return (!path.is_empty()).then(|| PathBuf::from(path));
     }
     None
+}
+
+fn continues_incomplete_utf8(body: &[u8], byte: u8) -> bool {
+    if !(0x80..=0xbf).contains(&byte) {
+        return false;
+    }
+
+    let Err(error) = std::str::from_utf8(body) else {
+        return false;
+    };
+    if error.error_len().is_some() {
+        return false;
+    }
+
+    let tail = &body[error.valid_up_to()..];
+    if tail.len() >= 4 {
+        return false;
+    }
+
+    let mut bytes = [0; 4];
+    bytes[..tail.len()].copy_from_slice(tail);
+    bytes[tail.len()] = byte;
+    match std::str::from_utf8(&bytes[..=tail.len()]) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none(),
+    }
 }
 
 /// Maximum retained string length for agent OSC title and progress payloads.
@@ -1276,6 +1302,18 @@ mod tests {
     }
 
     #[test]
+    fn cwd_osc_tracker_detects_raw_st_terminated_osc7_sequence() {
+        let mut tracker = CwdOscTracker::default();
+
+        tracker.observe(b"\x1b]7;file:///tmp/herdr\x9c");
+
+        assert_eq!(
+            tracker.drain_latest(),
+            Some(std::path::PathBuf::from("/tmp/herdr"))
+        );
+    }
+
+    #[test]
     fn cwd_osc_tracker_detects_windows_terminal_cwd_sequence() {
         let mut tracker = CwdOscTracker::default();
 
@@ -1284,6 +1322,20 @@ mod tests {
         assert_eq!(
             tracker.drain_latest(),
             Some(std::path::PathBuf::from("C:\\Users\\herdr\\src\\herdr"))
+        );
+    }
+
+    #[test]
+    fn cwd_osc_tracker_keeps_non_ascii_path_with_0x9c_continuation_byte() {
+        // "MÜll" encodes the Ü as 0xC3 0x9C; the 0x9C must not be mistaken
+        // for an 8-bit String Terminator mid-codepoint.
+        let mut tracker = CwdOscTracker::default();
+
+        tracker.observe("\x1b]7;file:///home/MÜll/project\x07".as_bytes());
+
+        assert_eq!(
+            tracker.drain_latest(),
+            Some(std::path::PathBuf::from("/home/MÜll/project"))
         );
     }
 
